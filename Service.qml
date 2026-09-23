@@ -460,12 +460,12 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        // brightnessctl -m prints: device,class,current,max,percent,percent-str
+        // brightnessctl -m prints: device,class,current,percent-str,max
         var parts = String(text).split(",");
         if (parts.length < 5)
           return;
         var raw = parseInt(parts[2], 10);
-        var max = parseInt(parts[3], 10);
+        var max = parseInt(parts[4], 10);
         if (!isFinite(raw) || !isFinite(max) || max <= 0)
           return;
         root.kbdLedMax = max;
