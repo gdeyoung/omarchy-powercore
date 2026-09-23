@@ -76,6 +76,16 @@ BarWidget {
       panelLoader.item.toggle();
   }
 
+  // PopupCard's outside-click dismissal routes through its `owner` — this
+  // widget. Without close() here it writes PopupCard.open directly, severing
+  // the binding chain from the panel's state: the panel then believes it is
+  // open while the card is hidden, and subsequent clicks toggle state that
+  // never renders — the popup stays wedged until a shell restart.
+  function close() {
+    if (panelLoader.item && panelLoader.item.close)
+      panelLoader.item.close();
+  }
+
   function icon() {
     return Model.batteryIcon(UPower.displayDevice, UPower.onBattery, upowerStates);
   }
