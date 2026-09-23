@@ -89,6 +89,56 @@ the control is a toggle and the panel shows the window the firmware will
 apply. ThinkPad/Framework machines with sysfs `charge_control_end_threshold`
 get the same toggle through UPower's threshold mode.
 
+## Roadmap (research-grounded)
+
+v0.1.0 was scoped against what the community actually asks for, not guesswork.
+Ranked ask inventory from Omarchy GitHub issues/discussions, r/omarchy, and
+the reference plugins' lineages (Sep 2026):
+
+Covered by v0.1.0 — the top four asks, which no single plugin served together:
+
+1. **Charge limit / protection toggle** — the single most-recurring ask since
+   Aug 2025 ([#627](https://github.com/omacom/omarchy/discussions/627),
+   [#4474](https://github.com/omacom/omarchy/discussions/4474),
+   [#10431](https://github.com/omacom/omarchy/discussions/10431));
+   patcastle.power forked the stock widget *just* to add it.
+2. **Per-source strategy** — profile + idle timings split by AC/battery
+   ([#933](https://github.com/omacom/omarchy/discussions/933), 17 votes;
+   auto profile switching shipped in Omarchy v3.4.0; idle split still open).
+3. **Lid/clamshell control** — the second-biggest complaint cluster
+   ([#1556](https://github.com/basecamp/omarchy/issues/1556),
+   [#3871](https://github.com/basecamp/omarchy/discussions/3871), 45 votes).
+4. **Live watts on the bar** — the efficiency-literate ask; Waybar's `{power}`
+   precedent ([#2963](https://github.com/Alexays/Waybar/issues/2963)).
+
+v2 candidates, in demand order (community evidence in parentheses):
+
+- **Charge-guidance notifications** — plug at 10/30%, unplug at 80% (r/omarchy
+  hand-rolled dotfiles; Waybar `states/events` is the feature floor).
+- **Battery health readout** — capacity/wear %, cycle count (batctl got a
+  97-upvote r/omarchy thread; omarchy-power-manager headlines it).
+- **Low-battery warning hardening** — stock bug #8813 (critical toast never
+  expires / replays after reboot) has 4 conflicting PRs; the first-party
+  battery service coexists, so a hardened re-implementation is safe.
+- **Time-remaining smoothing** — EMA over the gauge instead of UPower's raw
+  jump (chronic distro-wide complaint, no Omarchy tool serves it).
+- **Usage history / cost trends** — macOS-style day/week/month (Omabat, 36
+  upvotes; energy-meter already proves the RAPL+amdgpu path).
+- **Per-source lid actions** — powerplan's full matrix (suspend/ignore/lock/
+  shutdown per source) instead of the single clamshell toggle.
+- **Dual battery** — BAT0+BAT1 display ([#7067](https://github.com/basecamp/omarchy/discussions/7067),
+  a waybar→Quickshell regression).
+- **Not planned**: dGPU gating, TLP/tuned shims, RTC suspend-drain floor —
+  real asks but wrong scope for a shell plugin (need root helpers; see
+  powerplan's signed-package approach for the cost of that road).
+
+Known ecosystem gaps we share: thresholds live in EC firmware and can revert
+without boot/resume hooks (batctl ships udev+systemd persistence for this —
+UPower's own service survives reboots, which is why PowerCore routes through
+it rather than sysfs); and no rootless numeric-threshold path exists anywhere
+in the ecosystem yet ([#10431](https://github.com/omacom/omarchy/discussions/10431)
+is the open design).
+
 ## Development
 
 ```
