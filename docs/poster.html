@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PowerCore — marketplace preview</title>
+<style>
+  /* House style (Display+/tailfin): near-black canvas, one accent, mono body,
+     big sans headline, left text column + right panel column. */
+  :root {
+    --bg: #0a0c10;
+    --ink: #f2f5fa;
+    --body: #aab3c2;
+    --dim: #67707f;
+    --accent: #9ece6a;
+    --accent-soft: rgba(158,206,106,.13);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 2000px; height: 1125px; overflow: hidden; }
+  body {
+    background:
+      radial-gradient(1100px 700px at 88% 108%, rgba(158,206,106,.16), transparent 60%),
+      radial-gradient(900px 600px at -5% -10%, rgba(158,206,106,.07), transparent 55%),
+      var(--bg);
+    font-family: 'JetBrains Mono', 'JetBrainsMono Nerd Font', ui-monospace, monospace;
+    color: var(--ink);
+    display: flex;
+    align-items: center;
+    padding: 0 110px;
+  }
+  .left { width: 980px; flex: none; margin-right: 40px; }
+  .crumb { font-size: 21px; color: var(--accent); letter-spacing: .22em; }
+  h1 {
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+    font-size: 74px; font-weight: 750; line-height: 1.08;
+    letter-spacing: -0.015em; margin: 30px 0 26px;
+  }
+  .sub { font-size: 24px; color: var(--body); line-height: 1.6; max-width: 880px; }
+  .features {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 16px 44px; margin-top: 52px; max-width: 920px;
+  }
+  .features div { font-size: 19.5px; color: var(--body); line-height: 1.45; }
+  .features div::before { content: "\25C6  "; color: var(--accent); font-size: 13px; vertical-align: 2px; }
+  .foot {
+    position: absolute; left: 110px; bottom: 58px; right: 910px;
+    border-top: 1px solid rgba(255,255,255,.10); padding-top: 26px;
+    font-size: 19px; color: var(--dim); display: flex; justify-content: space-between;
+  }
+  .right { position: relative; flex: none; width: 760px; height: 100%; }
+  .panelshot {
+    position: absolute; border-radius: 22px;
+    box-shadow: 0 40px 110px rgba(0,0,0,.65), 0 0 0 1px rgba(158,206,106,.35);
+  }
+  /* Cascade inside the right zone only — never crosses into the text column. */
+  #p1 { width: 700px; left: 0px;    top: 40px;  z-index: 3; }   /* panel top: hero+stats+protection */
+  #p2 { width: 430px; left: 300px; top: 700px; z-index: 2; }   /* bar strip with watts */
+</style>
+</head>
+<body>
+  <div class="left">
+    <div class="crumb">POWERCORE / GDEYOUNG</div>
+    <h1>Battery power, per source. One widget.</h1>
+    <div class="sub">PowerCore replaces the stock battery widget: separate power
+    profile, screensaver, lock, sleep and keyboard backlight for plugged-in vs
+    on battery — plus a charge-protection toggle, clamshell mode, and live
+    watts on the bar.</div>
+    <div class="features">
+      <div>Per-source power profile &amp; idle timings</div>
+      <div>Battery protection toggle (UPower, no root)</div>
+      <div>Clamshell: keep running, lid closed</div>
+      <div>Keyboard backlight per power source</div>
+      <div>Live watts — true whole-system draw on battery</div>
+      <div>Optional battery gauge across the whole bar</div>
+      <div>Right-click cycles %, watts, or both</div>
+      <div>No daemon, no udev rule, no root</div>
+    </div>
+  </div>
+  <div class="right">
+    <img class="panelshot" id="p1" src="file:///home/gdeyoung/omarchy-powercore/docs/panel.png">
+    <img class="panelshot" id="p2" src="file:///home/gdeyoung/omarchy-powercore/docs/bar.png">
+  </div>
+  <div class="foot">
+    <span>github.com/gdeyoung/omarchy-powercore</span>
+    <span>Omarchy · Quickshell · MIT</span>
+  </div>
+</body>
+</html>

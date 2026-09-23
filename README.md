@@ -5,6 +5,16 @@ replaces the stock `omarchy.power` widget: per-source power strategy, battery
 protection, clamshell lid control, per-source keyboard backlight, and live
 power draw in watts — one icon, one panel.
 
+![preview](preview.png)
+
+**The panel** — hero, live draw, protection and clamshell toggles, one
+strategy section per power source:
+
+![panel](docs/panel.png)
+
+**The bar widget** — icon + `100%` + live watts, far right; right-click
+![bar widget — icon, percentage, live watts](docs/bar.png)
+
 ```
 Per power source (plugged in / on battery), independently:
   power profile    power-saver · balanced · performance (powerprofilesctl)
@@ -47,7 +57,7 @@ Credits and sources, all MIT:
 
 ```
 omarchy plugin add https://github.com/gdeyoung/omarchy-powercore.git --enable
-omarchy bar put gdeyoung.powercore --section right --after omarchy.power
+omarchy bar put gdeyoung.powercore --section right
 omarchy bar remove omarchy.power   # optional: drop the stock widget
 ```
 
@@ -56,6 +66,12 @@ with user privileges: profiles via `omarchy-powerprofiles-set`, charge limit
 via UPower D-Bus (polkit allows the active session), keyboard backlight via
 `brightnessctl` (logind fallback), lid via a logind inhibitor held by a child
 process that dies with the shell.
+
+Removal: `omarchy plugin disable gdeyoung.powercore && omarchy plugin remove
+gdeyoung.powercore`, then re-enable the stock widget with `omarchy plugin
+enable omarchy.power`. Before removing, set every "never" idle timing back to
+a real interval — the idle settings live in Omarchy's shell config and stay
+where the plugin left them.
 
 ## Bar interactions
 
