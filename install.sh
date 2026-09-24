@@ -22,6 +22,7 @@ install -m 644 "$repo_dir/manifest.json"  "$plugin_dir/manifest.json"
 install -m 644 "$repo_dir/README.md"      "$plugin_dir/README.md"
 install -m 644 "$repo_dir/LICENSE"        "$plugin_dir/LICENSE"
 install -m 755 "$repo_dir/powerdraw.sh"   "$plugin_dir/powerdraw.sh"
+install -m 755 "$repo_dir/shelljson-idle.sh" "$plugin_dir/shelljson-idle.sh"
 say "installed: $plugin_dir"
 
 # --- 2. Sampler sanity check --------------------------------------------------

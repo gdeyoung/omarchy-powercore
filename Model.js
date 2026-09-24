@@ -82,21 +82,57 @@ function gaugeSpec(fraction, charging) {
 
 // The plugin's own entry in shell.json: a bar layout item or a plugins[] item
 // whose id matches. Settings are the other fields on that entry.
-function findEntry(config, id) {
-  if (!config || typeof config !== "object") return null
+// The plugin's own entry: a bar layout item whose id matches (the settings
+// live inline on that entry). Works against both the full shell config
+// (first-party injection) and the live-pushed barConfig a third-party
+// service actually receives.
+function entryFromBarConfig(bar, id) {
+  if (!bar || typeof bar !== "object") return null
   var sections = ["left", "center", "right"]
-  var layout = config.bar && config.bar.layout && typeof config.bar.layout === "object" ? config.bar.layout : {}
+  var layout = bar.layout && typeof bar.layout === "object" ? bar.layout : {}
   for (var s = 0; s < sections.length; s++) {
     var arr = Array.isArray(layout[sections[s]]) ? layout[sections[s]] : []
     for (var i = 0; i < arr.length; i++) {
       if (arr[i] && arr[i].id === id) return arr[i]
     }
   }
+  return null
+}
+
+function findEntry(config, id) {
+  if (!config || typeof config !== "object") return null
+  var direct = entryFromBarConfig(config.bar, id)
+  if (direct) return direct
   var plugins = Array.isArray(config.plugins) ? config.plugins : []
   for (var j = 0; j < plugins.length; j++) {
     if (plugins[j] && plugins[j].id === id) return plugins[j]
   }
   return null
+}
+
+// Resolve our settings entry from whatever the injected shell API exposes.
+// Third-party services receive a scoped API with barConfig only (no
+// shellConfig); first-party injection has the whole config.
+function entryForShell(shellApi, id) {
+  if (!shellApi) return null
+  if (shellApi.shellConfig && typeof shellApi.shellConfig === "object") {
+    var entry = findEntry(shellApi.shellConfig, id)
+    if (entry) return entry
+  }
+  return entryFromBarConfig(shellApi.barConfig, id)
+}
+
+// The idle block of shell.json, read from the file text (the scoped plugin
+// API does not expose it). Returns null when the text is not parseable.
+function idleFromShellJsonText(text) {
+  try {
+    var parsed = JSON.parse(String(text || ""))
+    if (!parsed || typeof parsed !== "object") return null
+    var idle = parsed.idle && typeof parsed.idle === "object" ? parsed.idle : {}
+    return { screensaver: idle.screensaver, lock: idle.lock }
+  } catch (error) {
+    return null
+  }
 }
 
 function sourceKey(source, field) {
@@ -566,6 +602,9 @@ if (typeof module !== "undefined") {
     sameIdleConfig: sameIdleConfig,
     DEFAULTS: DEFAULTS,
     findEntry: findEntry,
+    entryFromBarConfig: entryFromBarConfig,
+    entryForShell: entryForShell,
+    idleFromShellJsonText: idleFromShellJsonText,
     sourceKey: sourceKey,
     sourceLabel: sourceLabel,
     hardware: hardware,

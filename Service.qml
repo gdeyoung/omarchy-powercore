@@ -68,7 +68,7 @@ Item {
   // ---------------------------------------------------------------- settings
 
   function readSettings() {
-    var entry = shell ? Model.findEntry(shell.shellConfig, pluginId) : null;
+    var entry = Model.entryForShell(shell, pluginId);
     var next = entry || ({});
     if (JSON.stringify(next) === JSON.stringify(rawSettings))
       return;
@@ -76,24 +76,65 @@ Item {
     scheduleSync();
   }
 
+  // Settings writes are serialized and confirmed: each updateEntryInline is
+  // merged onto the last CONFIRMED file content (rawSettings, updated by the
+  // shell.json watch), and the next queued patch waits for that
+  // confirmation. The pushed barConfig can lag a burst of writes; merging
+  // from it mid-burst silently resurrects older sibling values.
+  property var pendingSettingPatches: []
+  property bool settingsWriteBusy: false
+
   function saveSettings(patch) {
+    pendingSettingPatches = pendingSettingPatches.concat([patch]);
+    drainSettings();
+  }
+
+  function drainSettings() {
+    if (settingsWriteBusy || pendingSettingPatches.length === 0)
+      return;
+    settingsWriteBusy = true;
     var merged = {};
     for (var k in rawSettings)
       merged[k] = rawSettings[k];
-    for (var p in patch) {
-      if (patch[p] === undefined)
-        delete merged[p];
-      else
-        merged[p] = patch[p];
+    for (var p = 0; p < pendingSettingPatches.length; p++) {
+      var patch = pendingSettingPatches[p];
+      for (var key in patch) {
+        if (patch[key] === undefined)
+          delete merged[key];
+        else
+          merged[key] = patch[key];
+      }
     }
+    pendingSettingPatches = [];
+    settingsBusyTimer.restart();
     if (shell && typeof shell.updateEntryInline === "function")
       shell.updateEntryInline(pluginId, merged);
-    else
+    else {
+      settingsWriteBusy = false;
+      settingsBusyTimer.stop();
       log("settings-not-persisted", "shell has no updateEntryInline");
+    }
   }
 
+  // No-op writes (same content) never change the file, so the confirmation
+  // watch would never fire; this clears the busy flag instead.
+  Timer {
+    id: settingsBusyTimer
+    interval: 3000
+    repeat: false
+    onTriggered: {
+      root.settingsWriteBusy = false;
+      root.drainSettings();
+    }
+  }
+
+  // The scoped plugin API exposes no shellConfig-change signal; config
+  // pushes arrive as barConfig reassignments. Both are covered.
   Connections {
     target: root.shell
+    function onBarConfigChanged() {
+      root.readSettings();
+    }
     function onShellConfigChanged() {
       root.readSettings();
     }
@@ -104,24 +145,24 @@ Item {
     if (settled)
       return;
     readSettings();
+    syncAppliedIdleFromConfig();
     var applied = {};
     for (var i = 0; i < hardware.sources.length; i++)
       applied[hardware.sources[i]] = settings[Model.sourceKey(hardware.sources[i], "profile")];
+    // The boot autostart applies a generic profile (performance on AC), not
+    // this plugin's persisted choice, so for the CURRENT source the kernel
+    // word is the truth — syncing against the settings value would skip the
+    // write and leave the wrong profile active until the next source switch.
+    if (activeProfile !== "")
+      applied[source] = activeProfile;
     appliedProfile = applied;
-    var config = shell && shell.shellConfig ? shell.shellConfig : null;
-    var idle = config && config.idle && typeof config.idle === "object" ? config.idle : {};
-    var idleService = idleServiceNow();
-    appliedIdle = {
-      // Raw numbers, not normalizeDelay: the never sentinel sits above the
-      // range user settings are clamped to.
-      screensaver: Number(idle.screensaver),
-      lock: Number(idle.lock),
-      stayAwake: idleService ? !!idleService.stayAwake : false
-    };
     settled = true;
-    resolveServices();
     refreshCharge();
     syncLidInhibit();
+    // The persisted strategy must reach the kernel even when nothing
+    // changed since last boot (the boot autostart applies a generic
+    // default, not this plugin's per-source choice).
+    scheduleSync();
     log("settled", "source=" + source + " battery=" + batteryPresent + " lid=" + lidPresent + " kbd=" + kbdAvailable + " profile=" + strategy.profile + " idle=" + JSON.stringify(appliedIdle));
   }
 
@@ -148,7 +189,7 @@ Item {
     if (!settled)
       return;
     // An entry that is gone means the plugin was disabled: write nothing.
-    if (!shell || !Model.findEntry(shell.shellConfig, pluginId))
+    if (!shell || !Model.entryForShell(shell, pluginId))
       return;
     syncProfiles();
     syncIdle();
@@ -249,24 +290,30 @@ Item {
 
   // ------------------------------------------------------------------- sleep
 
-  // The first-party lock service may mount after us, so it is looked up
-  // until found rather than bound once.
-  property var lockService: null
-  readonly property bool locked: lockService ? !!lockService.locked : false
+  // The scoped plugin API cannot reach the first-party lock service
+  // (serviceFor is own-id only), so locked state comes from its IPC verb.
+  // Polled only while a sleep-after-lock delay is configured and the
+  // session is settled; ~10s of detection latency against a minutes-long
+  // sleep delay is noise.
+  property bool locked: false
   readonly property bool sleepArmed: settled && locked && strategy.sleep > 0
 
-  function resolveServices() {
-    if (!lockService && shell && typeof shell.serviceFor === "function")
-      lockService = shell.serviceFor("omarchy.lock");
-    if (!lockService)
-      serviceLookupTimer.start();
+  Timer {
+    id: lockPollTimer
+    interval: 10000
+    running: root.settled && root.strategy.sleep > 0
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: if (!lockPollProc.running) lockPollProc.running = true
   }
 
-  Timer {
-    id: serviceLookupTimer
-    interval: 5000
-    repeat: false
-    onTriggered: root.resolveServices()
+  Process {
+    id: lockPollProc
+    command: ["bash", "-c", "omarchy-shell lock isLocked 2>/dev/null || printf false"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.locked = String(text).trim() === "true"
+    }
   }
 
   // Armed only while the session is locked: the delay counts from the lock
@@ -469,11 +516,14 @@ Item {
         if (!isFinite(raw) || !isFinite(max) || max <= 0)
           return;
         root.kbdLedMax = max;
-        var nowPercent = Model.rawToPercent(raw, max);
-        // Drift (resume, Fn key): re-assert what the strategy wants. This
-        // slow poll is also the resume path: Omarchy's system-sleep hook
-        // zeroes the LED, and the next tick puts it back.
-        if (root.settled && nowPercent !== root.appliedKbdPercent)
+        // Drift (resume, Fn key) is a RAW-step difference: percent is a
+        // display mapping that loses resolution on coarse LEDs (40% and 33%
+        // are both raw step 1 on a max-3 LED), so comparing percents would
+        // re-assert forever. This slow poll is also the resume path:
+        // Omarchy's system-sleep hook zeroes the LED, and the next tick puts
+        // it back.
+        var appliedRaw = Model.percentToRaw(root.appliedKbdPercent, max);
+        if (root.settled && raw !== appliedRaw)
           root.setKbd(root.appliedKbdPercent, true);
       }
     }
@@ -609,9 +659,119 @@ Item {
 
   // -------------------------------------------------------------------- idle
 
-  // Looked up at call time: the first-party idle service may mount after us.
-  function idleServiceNow() {
-    return shell && typeof shell.serviceFor === "function" ? shell.serviceFor("omarchy.idle") : null;
+  // The Omarchy 4.x scoped plugin API gives a third-party service no
+  // shellConfig and no cross-service serviceFor; idle is reached through the
+  // sanctioned first-party proxy (bar-capable plugins get omarchy.idle) with
+  // the documented CLI as fallback, and the idle block of shell.json is
+  // read/written through the file itself (the shell hot-reloads it).
+  function idleProxy() {
+    return shell && typeof shell.firstPartyServiceFor === "function"
+      ? shell.firstPartyServiceFor("omarchy.idle") : null;
+  }
+
+  // Live stay-awake truth from the same state file the idle service and
+  // `omarchy toggle idle` use — works whichever path last wrote it. The
+  // file can be absent (stay-awake off) or created empty (on), so presence
+  // is probed with a process and the indicator directory is watched, the
+  // same pattern the first-party idle service uses.
+  readonly property string stayAwakeStatePath: home + "/.local/state/omarchy/indicators/stay-awake"
+  readonly property string indicatorsDir: home + "/.local/state/omarchy/indicators"
+
+  property bool userStayAwake: false
+
+  function setStayAwake(value, persist, reason) {
+    var enabled = !!value;
+    if (persist) {
+      var fileArg = enabled ? "stay-awake" : "allow-idle";
+      enqueue("stay-awake " + (enabled ? "on" : "off") + (reason ? " " + reason : ""),
+              ["omarchy-toggle-idle", fileArg]);
+    }
+    if (userStayAwake !== enabled)
+      userStayAwake = enabled;
+  }
+
+  Process {
+    id: stayAwakeProbe
+    command: ["bash", "-c",
+      'mkdir -p "$1" 2>/dev/null; [[ -f "$1/stay-awake" ]] && echo yes || echo no',
+      "_", root.indicatorsDir]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.userStayAwake = String(text).trim() === "yes"
+    }
+    onExited: stayAwakeDirWatch.reload()
+  }
+
+  FileView {
+    id: stayAwakeDirWatch
+    path: root.indicatorsDir
+    watchChanges: true
+    printErrors: false
+    onFileChanged: {
+      stayAwakeDirWatch.reload();
+      if (!stayAwakeProbe.running)
+        stayAwakeProbe.running = true;
+    }
+  }
+
+  FileView {
+    id: shellJsonWatch
+    path: home + "/.config/omarchy/shell.json"
+    preload: true
+    watchChanges: true
+    printErrors: false
+    onFileChanged: shellJsonWatch.reload()
+    onLoaded: root.syncFromShellJsonFile()
+    onLoadFailed: root.syncAppliedIdleFromConfig()
+  }
+
+  // shell.json is the ground truth for both the idle block and this plugin's
+  // entry settings. The barConfig push is the fast path; the file watch is
+  // the convergence path (covers lost pushes and external edits alike).
+  function syncFromShellJsonFile() {
+    // A file change is the write confirmation: the shell has persisted, so
+    // the next queued settings patch may merge onto fresh content.
+    settingsWriteBusy = false;
+    settingsBusyTimer.stop();
+    drainSettings();
+    var parsed = null;
+    try {
+      parsed = JSON.parse(String(shellJsonWatch.text() || ""));
+    } catch (error) {
+      parsed = null;
+    }
+    if (parsed && typeof parsed === "object") {
+      var entry = Model.findEntry(parsed, pluginId);
+      if (entry && JSON.stringify(entry) !== JSON.stringify(rawSettings)) {
+        rawSettings = entry;
+        scheduleSync();
+      }
+    }
+    syncAppliedIdleFromConfig();
+  }
+
+  // External idle edits (user, another tool) must not be re-applied over:
+  // appliedIdle tracks what shell.json actually says now.
+  function syncAppliedIdleFromConfig() {
+    var parsed = Model.idleFromShellJsonText(shellJsonWatch.text());
+    if (!parsed)
+      return;
+    var next = {
+      screensaver: isFinite(parsed.screensaver) ? parsed.screensaver : null,
+      lock: isFinite(parsed.lock) ? parsed.lock : null,
+      stayAwake: userStayAwake
+    };
+    if (!Model.sameIdleConfig(appliedIdle, next))
+      appliedIdle = next;
+  }
+
+  // Idle truth for the panel/status: the live proxy when present, the state
+  // file otherwise.
+  readonly property var idleInfo: {
+    var proxy = idleProxy();
+    if (proxy)
+      return { enabled: proxy.enabled, stayAwake: proxy.stayAwake, live: true };
+    return { enabled: !userStayAwake, stayAwake: userStayAwake, live: false };
   }
 
   // Writes the current strategy's timings into shell.json, which the
@@ -625,30 +785,29 @@ Item {
 
   function syncIdle() {
     var target = Model.idleConfigFor(strategy);
-    if (Model.sameIdleConfig(appliedIdle, target))
+    var idleService = idleProxy();
+    var currentStayAwake = idleService ? !!idleService.stayAwake : userStayAwake;
+    // Timings only: stayAwake in appliedIdle is the observed user state, not
+    // something this strategy wrote. Nulls mean "not yet known" — the first
+    // sync after settle always runs.
+    if (appliedIdle && appliedIdle.screensaver !== null
+        && appliedIdle.screensaver === target.screensaver
+        && appliedIdle.lock === target.lock)
       return;
-    appliedIdle = target;
-    if (shell && typeof shell.mutateShellConfig === "function") {
-      shell.mutateShellConfig(function (config) {
-        var idle = config.idle && typeof config.idle === "object" ? config.idle : {};
-        idle.screensaver = target.screensaver;
-        idle.lock = target.lock;
-        config.idle = idle;
-      });
-    } else {
-      log("idle-not-persisted", "shell has no mutateShellConfig");
-    }
-    var idleService = idleServiceNow();
-    if (target.stayAwake && !forcedStayAwake) {
+    appliedIdle = {
+      screensaver: target.screensaver,
+      lock: target.lock,
+      stayAwake: currentStayAwake
+    };
+    enqueue("idle " + source + " screensaver=" + target.screensaver + " lock=" + target.lock,
+            [pluginDir + "/shelljson-idle.sh", String(target.screensaver), String(target.lock)]);
+    if (target.stayAwake && !forcedStayAwake && !currentStayAwake) {
       forcedStayAwake = true;
-      if (idleService && typeof idleService.setIdleEnabled === "function")
-        idleService.setIdleEnabled(false);
-      else
-        log("idle-service-missing", "stay-awake not applied");
+      setStayAwake(true, true, "strategy");
     } else if (!target.stayAwake && forcedStayAwake) {
       forcedStayAwake = false;
-      if (idleService && typeof idleService.setIdleEnabled === "function")
-        idleService.setIdleEnabled(true);
+      if (currentStayAwake)
+        setStayAwake(false, true, "strategy-restore");
     }
     log("idle", source + " screensaver=" + target.screensaver + " lock=" + target.lock + " stayAwake=" + target.stayAwake);
   }
@@ -684,6 +843,7 @@ Item {
       strategy: root.strategy,
       appliedProfile: root.appliedProfile,
       appliedIdle: root.appliedIdle,
+      idle: root.idleInfo,
       externalScreen: root.externalScreen,
       screens: root.screenNames,
       lidInhibited: root.lidInhibited,
@@ -695,7 +855,7 @@ Item {
         method: root.drawMethod,
         watts: root.drawWatts
       },
-      lockService: !!root.lockService,
+      lockPollActive: lockPollTimer.running,
       locked: root.locked,
       sleepArmed: root.sleepArmed,
       queue: root.queue.length,
@@ -734,6 +894,7 @@ Item {
     refreshProfiles();
     lidProbeProc.running = true;
     kbdProbeProc.running = true;
+    stayAwakeProbe.running = true;
     settleTimer.start();
     log("service-ready", "source=" + source);
   }

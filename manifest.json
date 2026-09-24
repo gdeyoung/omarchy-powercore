@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "gdeyoung.powercore",
   "name": "PowerCore",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "gdeyoung",
   "license": "MIT",
   "description": "Battery widget replacement: per-source power profile, screensaver, lock and sleep, battery protection, clamshell lid control, keyboard backlight per power source, and live power draw in watts",
