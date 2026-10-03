@@ -230,6 +230,20 @@ Item {
     }
   }
 
+  // ---------------------------------------------------------------- feedback
+
+  // System-consistent feedback through the stock Omarchy OSD (verified:
+  // /usr/share/omarchy/bin/omarchy-osd, args -i icon -m message -d ms).
+  // Fire-and-forget: an OSD failure must never break the action behind it.
+  function toast(message, icon) {
+    if (osdProc.running)
+      return;
+    osdProc.command = ["omarchy-osd", "-i", icon || "󰚥", "-m", message, "-d", "1500"];
+    osdProc.running = true;
+  }
+
+  Process { id: osdProc }
+
   // ---------------------------------------------------------------- profiles
 
   function refreshProfiles() {
@@ -259,6 +273,9 @@ Item {
     var patch = {};
     patch[key] = value;
     saveSettings(patch);
+    // Feedback for the action the user just took, not for the background
+    // sync that re-applies a stored choice on boot or plug events.
+    toast("Power profile: " + value + " (" + src + ")", "󰾆");
   }
 
   // Applies the configured profile for `src` when it is the current source, or
@@ -333,12 +350,20 @@ Item {
   onLockedChanged: log("lock", locked ? "locked" : "unlocked")
   onSleepArmedChanged: log("sleep", sleepArmed ? "armed " + strategy.sleep + "s" : "disarmed")
 
+  // Scheduled through the user systemd manager so the suspend survives the
+  // caller's scope: a Quickshell restart between click and Suspend would
+  // otherwise kill a plain child `systemctl suspend` (pattern from
+  // hjanuschka/omarchy-standby, MIT). --collect cleans the transient unit
+  // up if it never fires; 100ms accuracy keeps the 1s delay honest.
   function suspend(reason) {
     if (sleepProc.running)
       return;
     log("suspend", reason);
-    sleepProc.command = ["systemctl", "suspend"];
+    sleepProc.command = ["systemd-run", "--user", "--collect", "--quiet",
+      "--on-active=1s", "--timer-property=AccuracySec=100ms",
+      "systemctl", "suspend", "--no-wall"];
     sleepProc.running = true;
+    toast("Suspending…", "󰊚");
   }
 
   Process {
@@ -643,6 +668,7 @@ Item {
     var value = !!enabled;
     chargeBusy = true;
     log("charge-limit", value ? "enable" : "disable");
+    toast(value ? "Battery protection on" : "Battery protection off", "󰁹");
     chargeSetProc.command = ["bash", "-c", 'dev=$(upower -e 2>/dev/null | grep -m1 BAT) && busctl call org.freedesktop.UPower "$dev" org.freedesktop.UPower.Device EnableChargeThreshold b "$1"', "_", value ? "true" : "false"];
     chargeSetProc.running = true;
   }
