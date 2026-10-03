@@ -28,6 +28,10 @@ Plus, always:
   clamshell            keep running with the lid closed on an external screen
   live power draw      watts on the bar, from the battery gauge (true
                        whole-system draw on battery) or the GPU sensor on AC
+  suspend scheduling   through the user systemd manager — a Quickshell
+                       restart between click and sleep cannot cancel it;
+                       profile switches, battery protection and suspend
+                       confirm with the Omarchy OSD
   bar-wide gauge       optional battery fill painted across the whole bar
 ```
 
