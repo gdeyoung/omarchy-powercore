@@ -319,7 +319,9 @@ Panel {
   KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
-    owner: root.hostWidget || root
+    owner: root  // widget-owner without close() lets KeyboardPanel.close()
+                 // assign open=false statically, severing the open binding
+                 // on first dismiss-overlay close (panel wedges until reload)
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
