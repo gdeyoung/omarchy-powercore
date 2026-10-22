@@ -76,11 +76,24 @@ omarchy bar put gdeyoung.powercore --section right
 omarchy bar remove omarchy.power   # optional: drop the stock widget
 ```
 
-No root, no daemon, no udev rule. Everything runs inside the shell process
-with user privileges: profiles via `omarchy-powerprofiles-set`, charge limit
+Root-free by default: everything above runs inside the shell process with
+user privileges — profiles via `omarchy-powerprofiles-set`, charge limit
 via UPower D-Bus (polkit allows the active session), keyboard backlight via
 `brightnessctl` (logind fallback), lid via a logind inhibitor held by a child
 process that dies with the shell.
+
+The lid-close modes are the one exception, and only when you apply one:
+applying writes systemd drop-ins under `/etc/systemd/logind.conf.d/` and
+`/etc/systemd/sleep.conf.d/` plus a battery-drain logging hook under
+`/usr/lib/systemd/system-sleep/`. That needs root, so PowerCore opens a
+floating terminal and asks for the sudo password there — nothing runs as
+root silently. `lidsleep.sh` (shipped in the plugin dir) is the whole
+mechanism: `json`/`status` read state without root; `set`/`delay`/`remove`
+write the drop-ins via the elevated terminal; `system` mode deletes the
+drop-ins and restores platform defaults. `Test hibernate` runs
+`systemctl hibernate` — logind allows it for the active session, no
+password. The plugin runs nothing else as root and installs no daemon,
+unit, or udev rule.
 
 Removal: `omarchy plugin disable gdeyoung.powercore && omarchy plugin remove
 gdeyoung.powercore`, then re-enable the stock widget with `omarchy plugin
