@@ -35,6 +35,10 @@ var DEFAULTS = {
   acSleep: NEVER,
   acKbdBacklight: 40,
   clamshell: true,
+  // Lid close behavior: desired mode + smart-mode hibernate delay.
+  // "system" ships the zero-change default (no drop-ins written).
+  lidMode: "system",
+  hibernateDelayMin: 60,
   barExtra: "percentage",
   barGauge: false,
   wattsRefreshSec: 4
@@ -225,6 +229,8 @@ function normalizeSettings(raw, available) {
     }
   }
   out.clamshell = normalizeBool(s.clamshell, DEFAULTS.clamshell)
+  out.lidMode = normalizeLidMode(s.lidMode, DEFAULTS.lidMode)
+  out.hibernateDelayMin = normalizeLidDelay(s.hibernateDelayMin, DEFAULTS.hibernateDelayMin)
   // Legacy betterpower `showPercentage: true` reads as the percentage mode;
   // its `barMode` values (off/percentage/gauge/both) map onto our split
   // barExtra + barGauge pair.
@@ -338,6 +344,175 @@ function lidBehavior(clamshell, external, lid) {
     return { inhibit: true, description: "Closing the lid keeps the session running on the external screen." }
   }
   return { inhibit: false, description: "Closing the lid follows the system's lid setting." }
+}
+
+// ---- Lid close behavior -----------------------------------------------------
+// Mechanism vendored from Daferia/omarchy-lid-sleep (MIT, commit 64eadcd,
+// 2026-10-22): logind/sleep drop-ins written by lidsleep.sh (needs root,
+// spawned in a floating terminal), plus a system-sleep hook that logs
+// battery % around every sleep.
+//
+// Two truths: the DESIRED mode lives in settings (shell.json, no root);
+// the APPLIED mode is what the systemd drop-ins actually say (lidsleep.sh
+// json). They diverge until the user elevates — the panel shows both.
+
+var LID_MODES = [
+  { value: "smart", label: "Smart", icon: "󰔛" },
+  { value: "suspend", label: "Sleep", icon: "󰒲" },
+  { value: "hibernate", label: "Hibernate", icon: "󰶘" },
+  { value: "lock", label: "Lock", icon: "󰌋" },
+  { value: "ignore", label: "Nothing", icon: "󰜺" },
+  { value: "system", label: "System", icon: "󰒏" }
+]
+
+var LID_DELAYS = [15, 30, 60, 120, 180]
+
+function normalizeLidMode(value, fallback) {
+  var s = String(value === undefined || value === null ? "" : value).trim().toLowerCase()
+  for (var i = 0; i < LID_MODES.length; i++)
+    if (LID_MODES[i].value === s)
+      return s
+  return fallback
+}
+
+function normalizeLidDelay(value, fallback) {
+  var n = Math.round(Number(value))
+  if (!isFinite(n))
+    return fallback
+  return LID_DELAYS.indexOf(n) >= 0 ? n : fallback
+}
+
+function lidModeLabel(mode) {
+  var m = normalizeLidMode(mode, "system")
+  for (var i = 0; i < LID_MODES.length; i++)
+    if (LID_MODES[i].value === m)
+      return LID_MODES[i].label
+  return "System"
+}
+
+// One-sentence readout of an applied (or desired) lid mode.
+function lidModeSummary(mode, delayMin) {
+  var d = normalizeLidDelay(delayMin, 60)
+  if (mode === "smart") return "Sleeps, then hibernates after " + d + " min on battery"
+  if (mode === "suspend") return "Light sleep only — drains ~1% per hour"
+  if (mode === "hibernate") return "Hibernates immediately on lid close"
+  if (mode === "lock") return "Locks the screen, stays awake"
+  if (mode === "ignore") return "Does nothing when the lid closes"
+  return "System default — sleeps when the lid closes"
+}
+
+// Parse `lidsleep.sh json` defensively; null on malformed input so the
+// panel can show an honest "unknown" instead of garbage.
+function parseLidState(jsonText) {
+  var o = null
+  try {
+    o = JSON.parse(String(jsonText))
+  } catch (e) {
+    return null
+  }
+  if (!o || typeof o !== "object")
+    return null
+  var hist = []
+  if (Array.isArray(o.history)) {
+    for (var i = 0; i < o.history.length; i++) {
+      var h = o.history[i]
+      if (!h || typeof h !== "object")
+        continue
+      var mins = Number(h.minutes)
+      var from = Number(h.from)
+      var to = Number(h.to)
+      if (!isFinite(mins) || !isFinite(from) || !isFinite(to))
+        continue
+      hist.push({
+        start: Number(h.start) || 0,
+        minutes: mins,
+        type: h.type === "hibernate" ? "hibernate" : "suspend",
+        from: from,
+        to: to
+      })
+    }
+  }
+  var delay = Number(o.delayMin)
+  return {
+    mode: normalizeLidMode(o.mode, "system"),
+    delayMin: isFinite(delay) ? Math.round(delay) : 0,
+    hibernationReady: !!o.hibernationReady,
+    recording: !!o.recording,
+    history: hist
+  }
+}
+
+// Desired (settings) vs applied (drop-in state): does an elevated apply remain?
+function lidPending(desiredMode, desiredDelay, state) {
+  if (!state)
+    return false
+  var want = normalizeLidMode(desiredMode, "system")
+  if (want !== state.mode)
+    return true
+  if (want === "smart" && normalizeLidDelay(desiredDelay, 60) !== state.delayMin)
+    return true
+  return false
+}
+
+// Average drain (%/hour) per sleep type plus the most recent sleep.
+function drainSummary(history) {
+  var out = { suspend: null, hibernate: null, last: null }
+  var list = Array.isArray(history) ? history : []
+  var counts = { suspend: 0, hibernate: 0 }
+  var sums = { suspend: 0, hibernate: 0 }
+  for (var i = 0; i < list.length; i++) {
+    var h = list[i]
+    var type = h.type === "hibernate" ? "hibernate" : "suspend"
+    if (h.minutes > 0) {
+      counts[type]++
+      sums[type] += (h.from - h.to) / (h.minutes / 60)
+    }
+  }
+  if (counts.suspend > 0)
+    out.suspend = { count: counts.suspend, perHour: sums.suspend / counts.suspend }
+  if (counts.hibernate > 0)
+    out.hibernate = { count: counts.hibernate, perHour: sums.hibernate / counts.hibernate }
+  if (list.length > 0)
+    out.last = list[list.length - 1]
+  return out
+}
+
+// "0.9%/h" — one decimal, clamped at zero; em dash when unknown.
+function drainLabel(perHour) {
+  var v = Number(perHour)
+  if (!isFinite(v) || v < 0)
+    return "—"
+  return v.toFixed(1) + "%/h"
+}
+
+// Delay options for the Smart-mode dropdown: {value,label} objects so the
+// Dropdown never re-parses strings.
+function lidDelayOptions() {
+  var out = []
+  for (var i = 0; i < LID_DELAYS.length; i++) {
+    var m = LID_DELAYS[i]
+    out.push({ value: String(m), label: m < 60 ? m + " min" : (m / 60) + " h" })
+  }
+  return out
+}
+
+// "3 h 33 min" / "45 min" for the last-sleep readout.
+function lidDurationLabel(minutes) {
+  var m = Math.max(0, Math.round(Number(minutes) || 0))
+  if (m < 60)
+    return m + " min"
+  var h = Math.floor(m / 60)
+  var r = m % 60
+  return r === 0 ? h + " h" : h + " h " + r + " min"
+}
+
+// The exact command the elevation terminal runs. Pinned by tests: the
+// helper path flows in from the plugin dir, never a hardcoded absolute.
+function lidApplyCommand(helperPath, mode, delayMin) {
+  var m = normalizeLidMode(mode, "system")
+  if (m === "smart")
+    return "sudo " + helperPath + " set smart " + normalizeLidDelay(delayMin, 60)
+  return "sudo " + helperPath + " set " + m
 }
 
 // ---- Battery hero, ported from the first-party power panel so both panels
@@ -589,6 +764,19 @@ if (typeof module !== "undefined") {
     isExternalScreen: isExternalScreen,
     hasExternalScreen: hasExternalScreen,
     lidBehavior: lidBehavior,
+    LID_MODES: LID_MODES,
+    LID_DELAYS: LID_DELAYS,
+    normalizeLidMode: normalizeLidMode,
+    normalizeLidDelay: normalizeLidDelay,
+    lidModeLabel: lidModeLabel,
+    lidModeSummary: lidModeSummary,
+    parseLidState: parseLidState,
+    lidPending: lidPending,
+    drainSummary: drainSummary,
+    drainLabel: drainLabel,
+    lidDelayOptions: lidDelayOptions,
+    lidDurationLabel: lidDurationLabel,
+    lidApplyCommand: lidApplyCommand,
     parseKeyValue: parseKeyValue,
     batteryFraction: batteryFraction,
     chargeThresholdActive: chargeThresholdActive,

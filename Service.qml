@@ -431,6 +431,85 @@ Item {
     });
   }
 
+  // ------------------------------------------------- lid close behavior
+  // Applied state comes from lidsleep.sh json (the systemd drop-ins; the
+  // vendored daferia.lid-sleep mechanism). The desired mode lives in
+  // settings and applies only through an elevated terminal run — this
+  // machine has no polkit agent, so the password is typed in a real
+  // floating terminal (see applyLid).
+
+  property var lidState: null
+  property bool lidStateProbed: false
+  readonly property bool lidPendingNow: Model.lidPending(settings.lidMode, settings.hibernateDelayMin, lidState)
+
+  Process {
+    id: lidStateProc
+    command: [root.pluginDir + "/lidsleep.sh", "json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var next = Model.parseLidState(text);
+        // A failed probe keeps the last known state; only a parseable
+        // answer advances the truth.
+        if (next) {
+          root.lidState = next;
+          root.lidStateProbed = true;
+        }
+      }
+    }
+  }
+
+  function refreshLidState() {
+    if (!lidStateProc.running)
+      lidStateProc.running = true;
+  }
+
+  function setLidMode(mode) {
+    saveSettings({
+      lidMode: Model.normalizeLidMode(mode, "system")
+    });
+  }
+
+  function setLidDelay(minutes) {
+    saveSettings({
+      hibernateDelayMin: Model.normalizeLidDelay(minutes, settings.hibernateDelayMin)
+    });
+  }
+
+  // The elevation terminal. The launcher execs uwsm-app, so this process
+  // exits when the terminal OPENS, not when the password is typed — the
+  // panel re-probes on its open-poll cadence and pending clears itself.
+  Process {
+    id: lidApplyProc
+    command: ["omarchy-launch-floating-terminal-with-presentation"].concat(
+      Model.lidApplyCommand(pluginDir + "/lidsleep.sh", root.settings.lidMode, root.settings.hibernateDelayMin).split(" "))
+    onExited: function (exitCode) {
+      root.log("lid-apply", "terminal launcher exit " + exitCode);
+    }
+  }
+
+  function applyLid() {
+    if (!lidPendingNow)
+      return;
+    if (lidApplyProc.running)
+      return;
+    log("lid-apply", "elevation terminal for " + settings.lidMode + " " + settings.hibernateDelayMin + "min");
+    lidApplyProc.running = true;
+  }
+
+  // CanHibernate is "yes" for the active session: no elevation needed.
+  Process {
+    id: lidHibernateProc
+    command: ["systemctl", "hibernate"]
+  }
+
+  function testHibernate() {
+    if (!lidHibernateProc.running) {
+      log("lid-test-hibernate", "systemctl hibernate");
+      lidHibernateProc.running = true;
+    }
+  }
+
   // ------------------------------------------------------ keyboard backlight
 
   // One probe at startup: the LED directory and its max_brightness, plus the
@@ -874,6 +953,13 @@ Item {
       screens: root.screenNames,
       lidInhibited: root.lidInhibited,
       lidBehavior: root.lidBehavior,
+      lid: {
+        probed: root.lidStateProbed,
+        applied: root.lidState,
+        desired: root.settings.lidMode,
+        desiredDelayMin: root.settings.hibernateDelayMin,
+        pending: root.lidPendingNow
+      },
       charge: root.chargeState,
       chargeCapability: root.chargeCapability,
       draw: {
@@ -921,6 +1007,7 @@ Item {
     lidProbeProc.running = true;
     kbdProbeProc.running = true;
     stayAwakeProbe.running = true;
+    refreshLidState();
     settleTimer.start();
     log("service-ready", "source=" + source);
   }

@@ -137,6 +137,45 @@ Panel {
   readonly property bool externalScreen: service ? service.externalScreen : false
   readonly property var lidBehavior: service ? service.lidBehavior : Model.lidBehavior(false, false)
 
+  // Lid close behavior (vendored daferia.lid-sleep mechanism): APPLIED state
+  // from the service (systemd drop-ins via lidsleep.sh), DESIRED from
+  // settings. They diverge until the user runs the elevated apply.
+  readonly property var lidState: service ? service.lidState : null
+  readonly property bool lidPending: service ? service.lidPendingNow : false
+  readonly property bool lidHibernationReady: !lidState || lidState.hibernationReady
+  readonly property bool lidHasHistory: !!lidState && !!lidState.history && lidState.history.length > 0
+  readonly property var lidDrain: Model.drainSummary(lidState && lidState.history ? lidState.history : [])
+  readonly property string lidAppliedKey: lidState ? lidState.mode + ":" + lidState.delayMin : ""
+  property string lidHeroSentence: ""
+  onLidAppliedKeyChanged: lidSwap.restart()
+  Component.onCompleted: {
+    lidHeroSentence = lidState ? Model.lidModeSummary(lidState.mode, lidState.delayMin) : "";
+  }
+
+  // Hero sentence swap on applied-mode change: fade out, swap, fade in.
+  SequentialAnimation {
+    id: lidSwap
+    PropertyAnimation {
+      target: lidHeroText
+      property: "opacity"
+      to: 0.0
+      duration: 180
+      easing.type: Easing.OutQuad
+    }
+    ScriptAction {
+      script: {
+        root.lidHeroSentence = root.lidState ? Model.lidModeSummary(root.lidState.mode, root.lidState.delayMin) : "";
+      }
+    }
+    PropertyAnimation {
+      target: lidHeroText
+      property: "opacity"
+      to: 1.0
+      duration: 260
+      easing.type: Easing.InQuad
+    }
+  }
+
   // Keyboard backlight live state from the service.
   readonly property bool kbdAvailable: service ? service.kbdAvailable : false
   readonly property int kbdPercent: service && service.appliedKbdPercent !== undefined ? service.appliedKbdPercent : 0
@@ -144,9 +183,14 @@ Panel {
   readonly property var kbdLedName: service ? service.kbdLedName : ""
 
   // Keyboard cursor over a grid. Row 0 is the protection toggle (when shown),
-  // then each source owns three rows: profile buttons, delay dropdowns, kbd
-  // dropdown. -1 means the cursor is parked.
+  // then the clamshell toggle; then the lid section rows on a machine with a
+  // lid: kind 0 = six mode buttons (one logical row across two visual rows),
+  // kind 1 = delay dropdown + test button, kind 2 = apply (only while a
+  // change is pending). Then each source owns three rows: profile buttons,
+  // delay dropdowns, kbd dropdown. -1 means the cursor is parked.
   readonly property int rowsPerSource: 3
+  readonly property int lidRows: hardware.clamshell ? (lidPending ? 3 : 2) : 0
+  readonly property int sourceBase: headRows + lidRows
   // Head controls in order: charge toggle when available, then clamshell on a
   // machine with a lid. Both may be absent (a desktop): the head is then empty.
   readonly property var headKeys: {
@@ -166,8 +210,10 @@ Panel {
   readonly property string cursorHead: cursorActive && cursorRow < headRows ? headKeys[cursorRow] : ""
   readonly property bool cursorOnCharge: cursorHead === "charge"
   readonly property bool cursorOnClamshell: cursorHead === "clamshell"
-  readonly property int cursorSource: cursorActive && !cursorOnCharge ? Math.floor((cursorRow - headRows) / rowsPerSource) : -1
-  readonly property int cursorKind: cursorActive && !cursorOnCharge ? (cursorRow - headRows) % rowsPerSource : -1
+  readonly property bool cursorOnLid: cursorActive && lidRows > 0 && cursorRow >= headRows && cursorRow < sourceBase
+  readonly property int cursorLidKind: cursorOnLid ? cursorRow - headRows : -1
+  readonly property int cursorSource: cursorActive && !cursorOnCharge && !cursorOnLid ? Math.floor((cursorRow - sourceBase) / rowsPerSource) : -1
+  readonly property int cursorKind: cursorSource >= 0 ? (cursorRow - sourceBase) % rowsPerSource : -1
   readonly property var delayFields: ["screensaver", "lock", "sleep"]
   property var delayControls: ({})
 
@@ -182,7 +228,15 @@ Panel {
   function rowLength(row) {
     if (row < headRows)
       return 1;
-    return (row - headRows) % rowsPerSource === 0 ? profileOptions.length : delayFields.length;
+    if (row < sourceBase) {
+      var kind = row - headRows;
+      if (kind === 0)
+        return Model.LID_MODES.length;
+      if (kind === 1)
+        return 2;
+      return 1;
+    }
+    return (row - sourceBase) % rowsPerSource === 0 ? profileOptions.length : delayFields.length;
   }
 
   function setChargeLimit(enabled) {
@@ -193,6 +247,59 @@ Panel {
   function setClamshell(enabled) {
     if (service)
       service.setClamshell(enabled);
+  }
+
+  function setLidMode(mode) {
+    if (service)
+      service.setLidMode(mode);
+  }
+
+  function setLidDelay(minutes) {
+    if (service)
+      service.setLidDelay(minutes);
+  }
+
+  function applyLid() {
+    if (service)
+      service.applyLid();
+  }
+
+  function testHibernate() {
+    if (service)
+      service.testHibernate();
+  }
+
+  function lidModeEnabled(value) {
+    if ((value === "smart" || value === "hibernate") && !lidHibernationReady)
+      return false;
+    return true;
+  }
+
+  function lidGlyph(mode) {
+    var m = Model.normalizeLidMode(mode, "system");
+    for (var i = 0; i < Model.LID_MODES.length; i++)
+      if (Model.LID_MODES[i].value === m)
+        return Model.LID_MODES[i].icon;
+    return "";
+  }
+
+  function lastSleepLabel() {
+    if (!lidDrain || !lidDrain.last)
+      return "Last sleep";
+    return lidDrain.last.type === "hibernate" ? "Last hibernate" : "Last sleep";
+  }
+
+  function lastSleepText() {
+    if (!lidDrain || !lidDrain.last)
+      return "—";
+    var l = lidDrain.last;
+    return Model.lidDurationLabel(l.minutes) + " · " + l.from + "%→" + l.to + "%";
+  }
+
+  function drainText(type) {
+    if (!lidDrain || !lidDrain[type])
+      return "—";
+    return Model.drainLabel(lidDrain[type].perHour) + " · " + lidDrain[type].count + "×";
   }
 
   function statusJson() {
@@ -223,9 +330,9 @@ Panel {
   }
 
   function moveCursor(dx, dy) {
-    var rows = headRows + sources.length * rowsPerSource;
+    var rows = headRows + lidRows + sources.length * rowsPerSource;
     if (!cursorActive) {
-      cursorRow = headRows + Math.max(0, sources.indexOf(source)) * rowsPerSource;
+      cursorRow = sourceBase + Math.max(0, sources.indexOf(source)) * rowsPerSource;
       cursorIndex = Math.max(0, profileOptions.map(function (o) {
         return o.value;
       }).indexOf(settingsView[Model.sourceKey(source, "profile")]));
@@ -251,6 +358,25 @@ Panel {
         setClamshell(!settingsView.clamshell);
       return;
     }
+    if (cursorOnLid) {
+      if (cursorLidKind === 0) {
+        var opt = Model.LID_MODES[cursorIndex];
+        if (opt && lidModeEnabled(opt.value))
+          setLidMode(opt.value);
+        return;
+      }
+      if (cursorLidKind === 1) {
+        if (cursorIndex === 0) {
+          if (settingsView.lidMode === "smart" && lidDelayControl && typeof lidDelayControl.open === "function")
+            lidDelayControl.open();
+        } else if (lidHibernationReady) {
+          testHibernate();
+        }
+        return;
+      }
+      applyLid();
+      return;
+    }
     if (cursorKind === 0) {
       if (cursorIndex < profileOptions.length && cursorSource < sources.length)
         setProfile(sources[cursorSource], profileOptions[cursorIndex].value);
@@ -259,6 +385,14 @@ Panel {
     var control = delayControls[cursorSource + ":" + cursorIndex];
     if (control && typeof control.open === "function")
       control.open();
+  }
+
+  onLidPendingChanged: {
+    // The apply row vanishes with the pending state; park the cursor if it
+    // was standing there (headRows + 2 can only be the apply row while it
+    // existed).
+    if (!lidPending && cursorRow === headRows + 2)
+      cursorRow = -1;
   }
 
   IpcHandler {
@@ -302,6 +436,23 @@ Panel {
       root.setKbdSource(source, percent);
       return root.statusJson();
     }
+    function setLidMode(mode: string): string {
+      root.setLidMode(mode);
+      return root.statusJson();
+    }
+    function setLidDelay(minutes: string): string {
+      root.setLidDelay(Number(minutes));
+      return root.statusJson();
+    }
+    function applyLid(): string {
+      root.applyLid();
+      return root.statusJson();
+    }
+    function refreshLid(): string {
+      if (root.service)
+        root.service.refreshLidState();
+      return root.statusJson();
+    }
   }
 
   onOpenedChanged: {
@@ -312,8 +463,20 @@ Panel {
         service.refreshProfiles();
         service.refreshCharge();
         service.refreshDraw();
+        service.refreshLidState();
       }
     }
+  }
+
+  // While a lid change is pending (password not entered yet), re-read the
+  // applied state so the pending strip clears itself the moment the
+  // drop-ins land.
+  Timer {
+    id: lidPollTimer
+    interval: 5000
+    running: root.opened && root.lidPending
+    repeat: true
+    onTriggered: if (root.service) root.service.refreshLidState()
   }
 
   KeyboardPanel {
@@ -564,6 +727,349 @@ Panel {
           opacity: 0.6
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
+        }
+
+        // ---------- Lid close behavior (undocked; docked is the clamshell
+        // toggle above). Applied truth leads; controls pick the DESIRED
+        // mode; the pending strip bridges the two until the elevated apply.
+        Column {
+          visible: root.hardware.clamshell
+          width: parent.width
+          spacing: Style.spacing.rowGap
+
+          PanelSeparator {
+            foreground: root.foreground
+          }
+
+          PanelSectionHeader {
+            text: "LID CLOSE · UNDOCKED"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          // Hero: the APPLIED sentence. Fades through lidSwap when the
+          // applied mode changes; muted fallback before the first probe.
+          Row {
+            width: parent.width
+            spacing: Style.spacing.lg
+
+            Text {
+              id: lidHeroGlyph
+              textFormat: Text.PlainText
+              text: root.lidState ? root.lidGlyph(root.lidState.mode) : ""
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+            }
+
+            Text {
+              id: lidHeroText
+              visible: !!root.lidState
+              textFormat: Text.PlainText
+              text: root.lidHeroSentence
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+              wrapMode: Text.Wrap
+              width: parent.width - lidHeroGlyph.width - parent.spacing
+            }
+          }
+
+          Text {
+            visible: !root.lidState
+            textFormat: Text.PlainText
+            text: "Checking the lid configuration…"
+            color: root.foreground
+            opacity: 0.6
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          // Sleep-drain read-out: the story is suspend pays, hibernate
+          // doesn't. Side by side, same grid as the battery stats row.
+          Row {
+            visible: root.lidHasHistory
+            width: parent.width
+            spacing: Style.spacing.huge
+
+            Column {
+              width: (parent.width - parent.spacing) / 2
+              spacing: Style.spacing.labelGap
+              InfoPair {
+                label: root.lastSleepLabel()
+                value: root.lastSleepText()
+              }
+              InfoPair {
+                label: "Sleep drain"
+                value: root.drainText("suspend")
+              }
+            }
+
+            Column {
+              width: (parent.width - parent.spacing) / 2
+              spacing: Style.spacing.labelGap
+              InfoPair {
+                label: "Hibernate drain"
+                value: root.drainText("hibernate")
+              }
+              InfoPair {
+                label: "Sleep log"
+                value: root.lidState && root.lidState.recording ? "on" : "off"
+              }
+            }
+          }
+
+          Text {
+            visible: !root.lidHasHistory
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: root.lidState && root.lidState.recording ? "Recording sleep drain — no sleeps logged yet" : "No sleep drain recorded yet"
+            color: root.foreground
+            opacity: 0.6
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          // Six exclusive modes, two rows of three (deterministic wrap),
+          // System last. Buttons carry the DESIRED mode; exactly one active.
+          Column {
+            width: parent.width
+            spacing: Style.spacing.md
+
+            Row {
+              id: lidModeRow1
+              width: parent.width
+              spacing: Style.spacing.md
+              readonly property int indexOffset: 0
+              readonly property real cellWidth: (width - spacing * 2) / 3
+
+              Repeater {
+                model: Model.LID_MODES.slice(0, 3)
+
+                Button {
+                  required property var modelData
+                  required property int index
+                  width: lidModeRow1.cellWidth
+                  iconText: modelData.icon
+                  iconSize: Style.font.title
+                  text: modelData.label
+                  fontSize: Style.font.bodySmall
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  horizontalPadding: Style.spacing.controlPaddingX
+                  verticalPadding: Style.spacing.controlPaddingY + Style.spacing.xxs
+                  bordered: true
+                  active: root.settingsView.lidMode === modelData.value
+                  enabled: root.lidModeEnabled(modelData.value)
+                  opacity: enabled ? 1 : 0.45
+                  tooltipText: enabled ? "" : "Needs hibernation setup"
+                  hasCursor: root.cursorOnLid && root.cursorLidKind === 0 && root.cursorIndex === index + lidModeRow1.indexOffset
+                  onClicked: root.setLidMode(modelData.value)
+                  onHovered: function (h) {
+                    if (h) {
+                      root.cursorRow = root.headRows;
+                      root.cursorIndex = index + lidModeRow1.indexOffset;
+                    }
+                  }
+                }
+              }
+            }
+
+            Row {
+              id: lidModeRow2
+              width: parent.width
+              spacing: Style.spacing.md
+              readonly property int indexOffset: 3
+              readonly property real cellWidth: (width - spacing * 2) / 3
+
+              Repeater {
+                model: Model.LID_MODES.slice(3)
+
+                Button {
+                  required property var modelData
+                  required property int index
+                  width: lidModeRow2.cellWidth
+                  iconText: modelData.icon
+                  iconSize: Style.font.title
+                  text: modelData.label
+                  fontSize: Style.font.bodySmall
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  horizontalPadding: Style.spacing.controlPaddingX
+                  verticalPadding: Style.spacing.controlPaddingY + Style.spacing.xxs
+                  bordered: true
+                  active: root.settingsView.lidMode === modelData.value
+                  enabled: root.lidModeEnabled(modelData.value)
+                  opacity: enabled ? 1 : 0.45
+                  tooltipText: enabled ? "" : "Needs hibernation setup"
+                  hasCursor: root.cursorOnLid && root.cursorLidKind === 0 && root.cursorIndex === index + lidModeRow2.indexOffset
+                  onClicked: root.setLidMode(modelData.value)
+                  onHovered: function (h) {
+                    if (h) {
+                      root.cursorRow = root.headRows;
+                      root.cursorIndex = index + lidModeRow2.indexOffset;
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // Hibernation not set up: honest why + the fix (state 4).
+          Row {
+            visible: !root.lidHibernationReady
+            width: parent.width
+            spacing: Style.spacing.xs
+
+            Text {
+              id: lidSetupGlyph
+              textFormat: Text.PlainText
+              text: "󰀦"
+              color: Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              text: "Smart and Hibernate need a hibernation setup — run `omarchy hibernation setup` to enable them."
+              color: root.foreground
+              opacity: 0.7
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+              width: parent.width - lidSetupGlyph.width - parent.spacing
+            }
+          }
+
+          // Smart's hibernate delay + a rootless test of hibernate resume.
+          Row {
+            width: parent.width
+            spacing: Style.spacing.md
+
+            Dropdown {
+              id: lidDelayControl
+              width: Math.round((parent.width - parent.spacing) * 0.55)
+              label: "Hibernate after"
+              options: Model.lidDelayOptions()
+              value: String(root.settingsView.hibernateDelayMin)
+              enabled: root.settingsView.lidMode === "smart"
+              opacity: enabled ? 1 : 0.45
+              foreground: root.foreground
+              accent: Color.accent
+              fontFamily: root.fontFamily
+              hasCursor: root.cursorOnLid && root.cursorLidKind === 1 && root.cursorIndex === 0
+              onChanged: function (v) {
+                root.setLidDelay(Number(v));
+              }
+              onHovered: function (h) {
+                if (h) {
+                  root.cursorRow = root.headRows + 1;
+                  root.cursorIndex = 0;
+                }
+              }
+            }
+
+            Button {
+              id: lidTestBtn
+              width: parent.width - parent.spacing - lidDelayControl.width
+              text: "Test hibernate"
+              leftAlign: true
+              bordered: true
+              fontSize: Style.font.bodySmall
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.spacing.xxs
+              enabled: root.lidHibernationReady
+              opacity: enabled ? 1 : 0.45
+              tooltipText: "Hibernates now — no password needed"
+              hasCursor: root.cursorOnLid && root.cursorLidKind === 1 && root.cursorIndex === 1
+              onClicked: root.testHibernate()
+              onHovered: function (h) {
+                if (h) {
+                  root.cursorRow = root.headRows + 1;
+                  root.cursorIndex = 1;
+                }
+              }
+            }
+          }
+
+          // Pending strip: desired ≠ applied. Accent info, never urgent.
+          Rectangle {
+            id: lidStripRect
+            visible: root.lidPending
+            width: parent.width
+            height: lidStripRow.implicitHeight + 2 * Style.spacing.rowPaddingX
+            radius: Style.cornerRadius
+            color: Style.selectedFillFor(root.foreground, Color.accent)
+            border.width: 1
+            border.color: Style.normalBorderFor(root.foreground, Color.accent)
+
+            Row {
+              id: lidStripRow
+              anchors.fill: parent
+              anchors.margins: Style.spacing.rowPaddingX
+              spacing: Style.spacing.md
+
+              Column {
+                id: lidStripTexts
+                width: parent.width - lidApplyItem.width - parent.spacing
+                spacing: Style.spacing.xxs
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Picked " + Model.lidModeLabel(root.settingsView.lidMode) + (root.settingsView.lidMode === "smart" ? " (" + root.settingsView.hibernateDelayMin + " min)" : "") + " — not applied yet"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                  wrapMode: Text.Wrap
+                  width: parent.width
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Apply opens a terminal and asks for your sudo password."
+                  color: root.foreground
+                  opacity: 0.7
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.Wrap
+                  width: parent.width
+                }
+              }
+
+              Item {
+                id: lidApplyItem
+                width: lidApplyBtn.width
+                height: lidStripTexts.implicitHeight
+
+                Button {
+                  id: lidApplyBtn
+                  anchors.centerIn: parent
+                  text: "Apply — sudo password"
+                  bordered: true
+                  fontSize: Style.font.bodySmall
+                  foreground: Color.accent
+                  accent: Color.accent
+                  fontFamily: root.fontFamily
+                  horizontalPadding: Style.spacing.controlPaddingX
+                  verticalPadding: Style.spacing.controlPaddingY + Style.spacing.xxs
+                  hasCursor: root.cursorOnLid && root.cursorLidKind === 2 && root.cursorIndex === 0
+                  onClicked: root.applyLid()
+                  onHovered: function (h) {
+                    if (h) {
+                      root.cursorRow = root.headRows + 2;
+                      root.cursorIndex = 0;
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
 
         PanelSeparator {

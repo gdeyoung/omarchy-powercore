@@ -26,6 +26,9 @@ Per power source (plugged in / on battery), independently:
 Plus, always:
   battery protection   UPower EnableChargeThreshold toggle (polkit, no root)
   clamshell            keep running with the lid closed on an external screen
+  lid close behavior   Smart (sleep, then hibernate after a delay on battery),
+                       sleep, hibernate, lock, nothing, or system default —
+                       plus a log of what each closed lid cost in battery
   live power draw      watts on the bar, from the battery gauge (true
                        whole-system draw on battery) or the GPU sensor on AC
   suspend scheduling   through the user systemd manager — a Quickshell
@@ -51,6 +54,14 @@ Credits and sources, all MIT:
   inhibitor, bar-wide gauge. <https://github.com/leakim34/omarchy-betterpower>
 - **valleytheknight.powerplan** — lid-close action handling reference.
   <https://github.com/ValleytheKnight/omarchy-powerplan-widget>
+- **daferia.lid-sleep** — the lid close mechanism, vendored into
+  `lidsleep.sh` from commit `64eadcd` (2026-10-22): logind/sleep drop-ins
+  for `suspend-then-hibernate` with a battery-only hibernate delay, plus a
+  system-sleep hook that logs battery % around every sleep. Adapted:
+  PowerCore's session inhibit lock keeps owning docked behavior (no
+  `HandleLidSwitchDocked` writes), a `system` mode restores platform
+  defaults, and zram-only swap reads as hibernation-not-ready.
+  <https://github.com/Daferia/omarchy-lid-sleep>
 - **floscom.kbd-backlight** — keyboard backlight service pattern
   (brightnessctl via logind, ramping, single-writer LED discipline).
   <https://github.com/floscom/omarchy-kbd-backlight>
@@ -88,9 +99,24 @@ where the plugin left them.
 
 Hero (icon, status, percentage) → progress bar → battery stats and live
 draw (with an honest source label) → battery protection toggle → clamshell
-toggle → one section per power source: profile buttons, screensaver/lock/
-sleep dropdowns, keyboard backlight dropdown. Full keyboard navigation like
-the stock panel.
+toggle → lid close behavior (applied-mode sentence, sleep-drain read-out,
+six exclusive modes, Smart's hibernate delay) → one section per power
+source: profile buttons, screensaver/lock/sleep dropdowns, keyboard
+backlight dropdown. Full keyboard navigation like the stock panel.
+
+## Lid close behavior
+
+This laptop is s2idle-only — a closed lid light-sleeps and drains ~1% per
+hour. Smart mode does what Windows does: sleep for instant wake, then
+hibernate to disk after the delay (battery only; on AC it stays in light
+sleep). Changing the mode writes systemd drop-ins, which needs root —
+PowerCore opens a floating terminal for the password, applies, and
+re-reads the real state (`lidsleep.sh json`); the panel always shows the
+applied truth, and a pending badge while desired ≠ applied. Hibernation
+must be set up first (`omarchy hibernation setup`); the panel gates Smart
+and Hibernate until it is. A system-sleep hook logs battery % around
+every sleep, so the panel can show what a closed lid actually cost —
+average %/hour for light sleep vs hibernate.
 
 ## Power draw, honestly
 

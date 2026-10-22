@@ -248,3 +248,139 @@ test("findEntry locates the plugin entry in bar layout or plugins list", () => {
   assert.equal(entry.barExtra, "watts")
   assert.equal(Model.findEntry(config, "missing"), null)
 })
+
+// ---- lid close behavior (vendored daferia.lid-sleep mechanism)
+
+test("lidMode normalizes to known modes with system fallback", () => {
+  assert.equal(Model.normalizeLidMode("SMART", "system"), "smart")
+  assert.equal(Model.normalizeLidMode("ignore", "system"), "ignore")
+  assert.equal(Model.normalizeLidMode("bogus", "system"), "system")
+  assert.equal(Model.normalizeLidMode(undefined, "suspend"), "suspend")
+})
+
+test("hibernateDelayMin accepts only the offered steps", () => {
+  assert.equal(Model.normalizeLidDelay(45, 60), 60) // 45 is not a step
+  assert.equal(Model.normalizeLidDelay("30", 60), 30)
+  assert.equal(Model.normalizeLidDelay(180, 60), 180)
+  assert.equal(Model.normalizeLidDelay(999, 60), 60)
+  // The seed list survives its own sanitizer.
+  for (const d of Model.LID_DELAYS)
+    assert.equal(Model.normalizeLidDelay(d, 60), d)
+})
+
+test("defaults ship the zero-change system mode", () => {
+  const s = Model.normalizeSettings({})
+  assert.equal(s.lidMode, "system")
+  assert.equal(s.hibernateDelayMin, 60)
+})
+
+test("parseLidState reads lidsleep.sh json and rejects garbage", () => {
+  const st = Model.parseLidState('{"mode":"smart","delayMin":120,"hibernationReady":true,"recording":false,"history":[]}')
+  assert.equal(st.mode, "smart")
+  assert.equal(st.delayMin, 120)
+  assert.equal(st.hibernationReady, true)
+  assert.equal(Model.parseLidState("not json"), null)
+  assert.equal(Model.parseLidState('{"mode":"zzz"}').mode, "system")
+  assert.equal(Model.parseLidState('{"delayMin":"45"}').delayMin, 45)
+})
+
+test("parseLidState normalizes history types and drops malformed entries", () => {
+  const st = Model.parseLidState('{"mode":"system","history":[{"start":1,"minutes":60,"type":"weird","from":90,"to":84},{"minutes":"x"},{"start":2,"minutes":1,"type":"hibernate","from":80,"to":80}]}')
+  assert.equal(st.history.length, 2)
+  assert.equal(st.history[0].type, "suspend") // unknown types read as light sleep
+  assert.equal(st.history[1].type, "hibernate")
+})
+
+test("lidPending flags mode and smart-delay divergence only", () => {
+  const st = Model.parseLidState('{"mode":"smart","delayMin":60}')
+  assert.equal(Model.lidPending("smart", 60, st), false)
+  assert.equal(Model.lidPending("smart", 30, st), true)
+  assert.equal(Model.lidPending("suspend", 999, st), true) // delay ignored for non-smart
+  assert.equal(Model.lidPending("smart", 60, null), false)
+})
+
+test("drainSummary averages %/hour per sleep type and keeps the last sleep", () => {
+  const hist = [
+    { start: 1, minutes: 60, type: "suspend", from: 90, to: 84 },   // 6%/h
+    { start: 2, minutes: 60, type: "suspend", from: 84, to: 80 },   // 4%/h
+    { start: 3, minutes: 1, type: "hibernate", from: 80, to: 80 }   // 0%/h
+  ]
+  const d = Model.drainSummary(hist)
+  assert.equal(d.suspend.count, 2)
+  assert.ok(Math.abs(d.suspend.perHour - 5.0) < 1e-9)
+  assert.equal(d.hibernate.count, 1)
+  assert.equal(d.hibernate.perHour, 0)
+  assert.equal(d.last.start, 3)
+  const empty = Model.drainSummary([])
+  assert.equal(empty.suspend, null)
+  assert.equal(empty.last, null)
+})
+
+test("drainLabel formats one decimal and an em dash for unknown", () => {
+  assert.equal(Model.drainLabel(0.94), "0.9%/h")
+  assert.equal(Model.drainLabel(6), "6.0%/h")
+  assert.equal(Model.drainLabel(NaN), "—")
+  assert.equal(Model.drainLabel(-1), "—")
+})
+
+test("lidApplyCommand builds the exact elevation command", () => {
+  assert.equal(Model.lidApplyCommand("./lidsleep.sh", "smart", 30), "sudo ./lidsleep.sh set smart 30")
+  assert.equal(Model.lidApplyCommand("./lidsleep.sh", "smart", 45), "sudo ./lidsleep.sh set smart 60") // off-step normalizes
+  assert.equal(Model.lidApplyCommand("./lidsleep.sh", "lock"), "sudo ./lidsleep.sh set lock")
+  assert.equal(Model.lidApplyCommand("./lidsleep.sh", "bogus"), "sudo ./lidsleep.sh set system")
+})
+
+const manifest = require("../manifest.json")
+
+test("manifest carries lid keys in BOTH defaults and schema without drift", () => {
+  for (const k of ["lidMode", "hibernateDelayMin"]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(manifest.barWidget.defaults, k), k + " missing from defaults")
+    const sch = manifest.barWidget.schema.find((s) => s.key === k)
+    assert.ok(sch, k + " missing from schema")
+    assert.strictEqual(sch.defaultValue, manifest.barWidget.defaults[k], k + " default drift between schema and defaults")
+  }
+})
+
+test("every LID_MODES value survives normalizeLidMode", () => {
+  for (const m of Model.LID_MODES)
+    assert.equal(Model.normalizeLidMode(m.value, "system"), m.value)
+})
+
+test("lidDelayOptions returns value/label objects for every step", () => {
+  const opts = Model.lidDelayOptions()
+  assert.equal(opts.length, Model.LID_DELAYS.length)
+  assert.deepEqual(opts[0], { value: "15", label: "15 min" })
+  assert.deepEqual(opts[2], { value: "60", label: "1 h" })
+  assert.deepEqual(opts[4], { value: "180", label: "3 h" })
+})
+
+test("lidDurationLabel formats minutes", () => {
+  assert.equal(Model.lidDurationLabel(45), "45 min")
+  assert.equal(Model.lidDurationLabel(213), "3 h 33 min")
+  assert.equal(Model.lidDurationLabel(120), "2 h")
+  assert.equal(Model.lidDurationLabel(0), "0 min")
+  assert.equal(Model.lidDurationLabel("x"), "0 min")
+})
+
+// ---- structure pins: the lid section is wired, not just present
+
+const fs = require("node:fs")
+const path = require("node:path")
+const panelSrc = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+const serviceSrc = fs.readFileSync(path.join(__dirname, "..", "Service.qml"), "utf8")
+
+test("Panel carries the lid section wired to the service", () => {
+  assert.ok(panelSrc.includes("LID CLOSE · UNDOCKED"))
+  assert.ok(panelSrc.includes("service.setLidMode"))
+  assert.ok(panelSrc.includes("service.applyLid"))
+  assert.ok(panelSrc.includes("service.refreshLidState"))
+  // Exclusivity: the active binding compares desired mode, never a blend with applied.
+  assert.ok(panelSrc.includes("settingsView.lidMode ==="))
+})
+
+test("Service exposes the lid contract end to end", () => {
+  assert.ok(serviceSrc.includes("function applyLid()"))
+  assert.ok(serviceSrc.includes("function refreshLidState()"))
+  assert.ok(serviceSrc.includes("Model.lidApplyCommand"))
+  assert.ok(serviceSrc.includes("lidsleep.sh"))
+})
