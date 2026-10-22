@@ -196,7 +196,7 @@ json_awk='
   }
   /^HibernateDelaySec=/ { v=$0; sub(/^[^=]*=/, "", v); delayMin=mins(v) }
   END {
-    printf "{\"mode\":\"%s\",\"delayMin\":%d,\"hibernateReady\":%s",
+    printf "{\"mode\":\"%s\",\"delayMin\":%d,\"hibernationReady\":%s",
       mode, delayMin, (ready == "true" ? "true" : "false")
   }'
 

@@ -118,6 +118,12 @@ and Hibernate until it is. A system-sleep hook logs battery % around
 every sleep, so the panel can show what a closed lid actually cost —
 average %/hour for light sleep vs hibernate.
 
+The panel probes `lidsleep.sh` directly rather than going through a
+service facade: replacement bars (like ultrawide-bar) deliberately serve
+third-party widgets a service-less shell facade, so the lid section — and
+the settings write, via the bar entry API — is fully panel-autonomous and
+works under any bar.
+
 ## Power draw, honestly
 
 On battery the draw is the battery gauge's V×I — everything the machine

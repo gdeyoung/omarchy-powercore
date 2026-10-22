@@ -436,7 +436,7 @@ function parseLidState(jsonText) {
   return {
     mode: normalizeLidMode(o.mode, "system"),
     delayMin: isFinite(delay) ? Math.round(delay) : 0,
-    hibernationReady: !!o.hibernationReady,
+    hibernationReady: !!(o.hibernationReady || o.hibernateReady),
     recording: !!o.recording,
     history: hist
   }

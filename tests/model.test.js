@@ -274,6 +274,11 @@ test("defaults ship the zero-change system mode", () => {
   assert.equal(s.hibernateDelayMin, 60)
 })
 
+test("parseLidState accepts the upstream hibernateReady key spelling", () => {
+  const st = Model.parseLidState('{"mode":"smart","delayMin":60,"hibernateReady":true,"recording":false,"history":[]}')
+  assert.equal(st.hibernationReady, true)
+})
+
 test("parseLidState reads lidsleep.sh json and rejects garbage", () => {
   const st = Model.parseLidState('{"mode":"smart","delayMin":120,"hibernationReady":true,"recording":false,"history":[]}')
   assert.equal(st.mode, "smart")
@@ -371,9 +376,13 @@ const serviceSrc = fs.readFileSync(path.join(__dirname, "..", "Service.qml"), "u
 
 test("Panel carries the lid section wired to the service", () => {
   assert.ok(panelSrc.includes("LID CLOSE · UNDOCKED"))
-  assert.ok(panelSrc.includes("service.setLidMode"))
-  assert.ok(panelSrc.includes("service.applyLid"))
-  assert.ok(panelSrc.includes("service.refreshLidState"))
+  // Panel-autonomous lid path: probes and applies directly (replacement bars
+  // serve a service-less facade), persists via the bar entry API.
+  assert.ok(panelSrc.includes("id: lidProc"))
+  assert.ok(panelSrc.includes("id: lidApplyProc"))
+  assert.ok(panelSrc.includes("function refreshLidState()"))
+  assert.ok(panelSrc.includes("updateEntryInline"))
+  assert.ok(!panelSrc.includes("service.setLidMode"))
   // Exclusivity: the active binding compares desired mode, never a blend with applied.
   assert.ok(panelSrc.includes("settingsView.lidMode ==="))
 })

@@ -19,7 +19,16 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
 
-  readonly property var service: bar && bar.shell && typeof bar.shell.serviceFor === "function" ? bar.shell.serviceFor("gdeyoung.powercore") : null
+  // Resolved lazily, never cached as null: the service singleton registers
+  // after bar widgets are created, so a one-shot binding at creation time
+  // froze null forever (why v0.4.0 IPC `status` answered "not loaded").
+  // Mutators re-resolve on entry; a one-shot timer heals the visual chain.
+  property var service: null
+  function resolveService() {
+    if (!service && bar && bar.shell && typeof bar.shell.serviceFor === "function")
+      service = bar.shell.serviceFor("gdeyoung.powercore");
+    return service;
+  }
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property var device: UPower.displayDevice
@@ -43,7 +52,20 @@ Panel {
 
   // What this machine offers; the service decides once, the panel hides the
   // rest. Before the service is up, assume the least: no battery, no lid, no LED.
-  readonly property var hardware: service ? service.hardware : Model.hardware(batteryPresent, false, false)
+  // Hardware facts: service-backed when available, else probed locally —
+  // under replacement bars the service facade is null and the local probe is
+  // the ONLY lid-presence source (the head clamshell toggle and the lid
+  // section both hang off hardware.clamshell).
+  property bool lidSwitchPresent: false
+  readonly property var hardware: service ? service.hardware : Model.hardware(batteryPresent, lidSwitchPresent, false)
+  Process {
+    command: ["bash", "-c", "ls /proc/acpi/button/lid 2>/dev/null"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.lidSwitchPresent = Model.parseLidProbe(text)
+    }
+    running: true
+  }
   readonly property var sources: hardware.sources
   readonly property string activeProfile: service ? service.activeProfile : ""
 
@@ -135,13 +157,16 @@ Panel {
   readonly property bool chargeLimitEnabled: service ? service.chargeLimitEnabled : false
   readonly property bool chargeBusy: service ? service.chargeBusy : false
   readonly property bool externalScreen: service ? service.externalScreen : false
-  readonly property var lidBehavior: service ? service.lidBehavior : Model.lidBehavior(false, false)
+  readonly property var lidBehavior: service ? service.lidBehavior : Model.lidBehavior(settingsView.clamshell, externalScreen, lidSwitchPresent)
 
   // Lid close behavior (vendored daferia.lid-sleep mechanism): APPLIED state
-  // from the service (systemd drop-ins via lidsleep.sh), DESIRED from
-  // settings. They diverge until the user runs the elevated apply.
-  readonly property var lidState: service ? service.lidState : null
-  readonly property bool lidPending: service ? service.lidPendingNow : false
+  // probed DIRECTLY by this panel (lidsleep.sh json) — never via
+  // bar.shell.serviceFor, which replacement bars (e.g. ultrawide-bar)
+  // deliberately serve as a service-less facade. DESIRED lives in settings;
+  // the two diverge until the user runs the elevated apply.
+  property var lidState: null
+  readonly property bool lidPending: Model.lidPending(settingsView.lidMode, settingsView.hibernateDelayMin, lidState)
+  readonly property string lidScriptPath: Qt.resolvedUrl("lidsleep.sh").toString().replace("file://", "")
   readonly property bool lidHibernationReady: !lidState || lidState.hibernationReady
   readonly property bool lidHasHistory: !!lidState && !!lidState.history && lidState.history.length > 0
   readonly property var lidDrain: Model.drainSummary(lidState && lidState.history ? lidState.history : [])
@@ -150,6 +175,7 @@ Panel {
   onLidAppliedKeyChanged: lidSwap.restart()
   Component.onCompleted: {
     lidHeroSentence = lidState ? Model.lidModeSummary(lidState.mode, lidState.delayMin) : "";
+    refreshLidState();
   }
 
   // Hero sentence swap on applied-mode change: fade out, swap, fade in.
@@ -174,6 +200,42 @@ Panel {
       duration: 260
       easing.type: Easing.InQuad
     }
+  }
+
+  // Applied-lid probe: this panel's own lidsleep.sh json reader. Runs at
+  // startup, on open, and on the pending-poll cadence. A failed probe keeps
+  // the last known state rather than blanking the section.
+  Process {
+    id: lidProc
+    command: [root.lidScriptPath, "json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var next = Model.parseLidState(text);
+        if (next)
+          root.lidState = next;
+      }
+    }
+  }
+
+  function refreshLidState() {
+    if (!lidProc.running)
+      lidProc.running = true;
+  }
+
+  // The elevation terminal. The launcher execs uwsm-app, so this process
+  // exits when the terminal OPENS, not when the password is typed — the
+  // pending poll re-probes and the strip clears itself once applied.
+  Process {
+    id: lidApplyProc
+    command: ["omarchy-launch-floating-terminal-with-presentation"].concat(
+      Model.lidApplyCommand(root.lidScriptPath, root.settingsView.lidMode, root.settingsView.hibernateDelayMin).split(" "))
+  }
+
+  // CanHibernate is "yes" for the active session: no elevation needed.
+  Process {
+    id: lidHibernateProc
+    command: ["systemctl", "hibernate"]
   }
 
   // Keyboard backlight live state from the service.
@@ -240,33 +302,49 @@ Panel {
   }
 
   function setChargeLimit(enabled) {
+    resolveService();
     if (service)
       service.setChargeLimit(enabled);
   }
 
   function setClamshell(enabled) {
+    resolveService();
     if (service)
       service.setClamshell(enabled);
   }
 
+  // Settings persist through the bar facade (updateEntryInline works under
+  // both the first-party bar and replacement bars); applied state changes
+  // only through the elevated lidsleep.sh apply.
+  function persistSettings(patch) {
+    var next = {};
+    for (var k in settings)
+      next[k] = settings[k];
+    for (var key in patch)
+      next[key] = patch[key];
+    settings = next;
+    if (bar && bar.shell && typeof bar.shell.updateEntryInline === "function")
+      bar.shell.updateEntryInline("gdeyoung.powercore", next);
+  }
+
   function setLidMode(mode) {
-    if (service)
-      service.setLidMode(mode);
+    persistSettings({ lidMode: Model.normalizeLidMode(mode, settingsView.lidMode) });
   }
 
   function setLidDelay(minutes) {
-    if (service)
-      service.setLidDelay(minutes);
+    persistSettings({ hibernateDelayMin: Model.normalizeLidDelay(minutes, settingsView.hibernateDelayMin) });
   }
 
   function applyLid() {
-    if (service)
-      service.applyLid();
+    if (!lidPending || lidApplyProc.running)
+      return;
+    lidApplyProc.running = true;
   }
 
   function testHibernate() {
-    if (service)
-      service.testHibernate();
+    if (!lidHibernationReady || lidHibernateProc.running)
+      return;
+    lidHibernateProc.running = true;
   }
 
   function lidModeEnabled(value) {
@@ -303,8 +381,21 @@ Panel {
   }
 
   function statusJson() {
+    resolveService();
     var status = service ? JSON.parse(service.statusJson()) : {
       service: "not loaded"
+    };
+    // The lid block is computed locally — it must be present under
+    // replacement bars where the service facade is unavailable.
+    status.lid = {
+      probed: !!lidState,
+      applied: lidState ? lidState.mode : "",
+      appliedDelayMin: lidState ? lidState.delayMin : 0,
+      hibernationReady: lidHibernationReady,
+      recording: !!(lidState && lidState.recording),
+      desired: settingsView.lidMode,
+      desiredDelayMin: settingsView.hibernateDelayMin,
+      pending: lidPending
     };
     status.opened = root.opened;
     status.cursor = {
@@ -315,16 +406,19 @@ Panel {
   }
 
   function setProfile(src, value) {
+    resolveService();
     if (service)
       service.setProfile(src, value);
   }
 
   function setDelay(src, field, seconds) {
+    resolveService();
     if (service)
       service.setDelay(src, field, seconds);
   }
 
   function setKbdSource(src, percent) {
+    resolveService();
     if (service)
       service.setKbdSource(src, percent);
   }
@@ -459,13 +553,22 @@ Panel {
     cursorRow = -1;
     if (opened) {
       refreshBattery();
+      refreshLidState();
       if (service) {
         service.refreshProfiles();
         service.refreshCharge();
         service.refreshDraw();
-        service.refreshLidState();
       }
     }
+  }
+
+  // Late heal for the visual chain: give the service singleton a beat to
+  // register after bar creation, then resolve once.
+  Timer {
+    interval: 600
+    running: true
+    repeat: false
+    onTriggered: root.resolveService()
   }
 
   // While a lid change is pending (password not entered yet), re-read the
@@ -476,7 +579,7 @@ Panel {
     interval: 5000
     running: root.opened && root.lidPending
     repeat: true
-    onTriggered: if (root.service) root.service.refreshLidState()
+    onTriggered: root.refreshLidState()
   }
 
   KeyboardPanel {
