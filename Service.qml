@@ -129,13 +129,12 @@ Item {
   }
 
   // The scoped plugin API exposes no shellConfig-change signal; config
-  // pushes arrive as barConfig reassignments. Both are covered.
+  // pushes arrive as barConfig reassignments, which is the only handler here.
+  // (A former onShellConfigChanged handler was dead code and warned on every
+  // shell start: "no signal of the target matches the name".)
   Connections {
     target: root.shell
     function onBarConfigChanged() {
-      root.readSettings();
-    }
-    function onShellConfigChanged() {
       root.readSettings();
     }
   }

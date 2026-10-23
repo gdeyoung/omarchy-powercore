@@ -228,13 +228,17 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: {
+    // Omarchy 4.5 BarIconButton contract: `text` must be the single icon
+    // glyph (it feeds OpticalGlyph); any figures beside it go via labelText.
+    // Pre-4.5 concatenated "87% 12W 󰁢" into text, which 4.5 renders as one
+    // squeezed glyph string (collapsed dots).
+    text: root.icon()
+    labelText: {
       var parts = [];
       if (root.showPercentage && root.percentage >= 0)
         parts.push(root.percentage + "%");
       if (root.wattsText !== "")
         parts.push(root.wattsText);
-      parts.push(root.icon());
       return parts.join(" ");
     }
     slotSize: Style.bar.iconSlot * ((root.showPercentage ? 1 : 0) + (root.wattsText !== "" ? 1 : 0) + 1)
