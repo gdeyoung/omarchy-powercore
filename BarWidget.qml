@@ -42,6 +42,19 @@ BarWidget {
   readonly property string drawMethod: service && service.drawSample ? service.drawSample.mode : ""
   readonly property string wattsText: showWatts && drawWatts > 0 ? Model.formatWatts(drawWatts) : ""
 
+  // Bar label ("84%" / "12.4W" / both) rendered via BarIconButton.labelText —
+  // kept OUT of `text` because OpticalGlyph normalizes the painted size of the
+  // whole `text` string to one icon slot, which scaled label+glyph down to a
+  // speck (v0.5.x "tiny icon" bug).
+  readonly property string barLabel: {
+    var parts = [];
+    if (showPercentage && percentage >= 0)
+      parts.push(percentage + "%");
+    if (wattsText !== "")
+      parts.push(wattsText);
+    return parts.join(" ");
+  }
+
   function cycleBarMode() {
     if (root.service && typeof root.service.saveSettings === "function") {
       var patch = { barExtra: Model.nextBarMode(settingsView.barExtra, batteryPresent) };
@@ -224,24 +237,28 @@ BarWidget {
     }
   }
 
+  // Hidden measurer: BarIconButton renders labelText at Style.bar.iconFont in
+  // the bar's font family; measuring with the same font gives the exact extra
+  // width past the icon slot so the bar never shifts between ticks.
+  Text {
+    id: labelMeasure
+    visible: false
+    text: root.barLabel
+    font.family: root.bar && root.bar.fontFamily ? root.bar.fontFamily : Style.font.family
+    font.pixelSize: Style.bar.iconFont
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // Omarchy 4.5 BarIconButton contract: `text` must be the single icon
-    // glyph (it feeds OpticalGlyph); any figures beside it go via labelText.
-    // Pre-4.5 concatenated "87% 12W 󰁢" into text, which 4.5 renders as one
-    // squeezed glyph string (collapsed dots).
+    // Glyph ONLY in `text` (stock power panel pattern): BarIconButton renders
+    // `text` through OpticalGlyph, which normalizes the painted size of the
+    // WHOLE string to one icon slot — a "84% 12.4W" prefix scaled the battery
+    // glyph down ~4x. The label renders full-size via `labelText`.
     text: root.icon()
-    labelText: {
-      var parts = [];
-      if (root.showPercentage && root.percentage >= 0)
-        parts.push(root.percentage + "%");
-      if (root.wattsText !== "")
-        parts.push(root.wattsText);
-      return parts.join(" ");
-    }
-    slotSize: Style.bar.iconSlot * ((root.showPercentage ? 1 : 0) + (root.wattsText !== "" ? 1 : 0) + 1)
+    labelText: root.barLabel
+    slotSize: Style.bar.iconSlot + (root.barLabel !== "" ? labelMeasure.implicitWidth + Style.space(4) : 0)
     // On a desktop the source never changes, so the tooltip names the profile.
     tooltipText: "Power · " + (root.batteryPresent ? Model.sourceLabel(UPower.onBattery ? "battery" : "ac") : (root.service && root.service.activeProfile ? root.service.activeProfile : "Plugged in"))
     onPressed: function (b) {
